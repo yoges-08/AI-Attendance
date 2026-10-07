@@ -12,6 +12,14 @@ __pycache__/
 *$py.class
 *.so
 
+# Registered Face Photos & User Images (Privacy protection)
+registered_photos/
+registered_photos_v*/
+face_photos/
+*.jpg
+*.jpeg
+*.png
+
 # Distribution / packaging
 build/
 develop-eggs/
