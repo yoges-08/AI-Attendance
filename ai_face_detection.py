@@ -95,6 +95,32 @@ FLASH_DURATION = 20              # 20 frames glowing green blink animation
 os.makedirs("registered_photos_v6", exist_ok=True)
 
 
+def open_camera(preferred_width=640, preferred_height=480, preferred_index=None):
+    """
+    Robust camera initialization with DirectShow prioritization for Windows
+    and automatic index fallback (0, 1, 2).
+    """
+    indices = [preferred_index] if preferred_index is not None else [0, 1, 2]
+    backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY] if os.name == 'nt' else [cv2.CAP_ANY]
+
+    for idx in indices:
+        for backend in backends:
+            try:
+                cap = cv2.VideoCapture(idx, backend)
+                if cap.isOpened():
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, preferred_width)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, preferred_height)
+                    ret, test_frame = cap.read()
+                    if ret and test_frame is not None and test_frame.size > 0:
+                        logging.info(f"Camera successfully connected on index {idx} (backend: {backend})")
+                        return cap
+                    cap.release()
+            except Exception as e:
+                logging.debug(f"Failed opening camera index {idx} with backend {backend}: {e}")
+    return None
+
+
 def draw_translucent_rect(img, pt1, pt2, color, alpha=0.65):
     overlay = img.copy()
     cv2.rectangle(overlay, pt1, pt2, color, -1)
@@ -553,10 +579,10 @@ class PowerFaceV5:
         self._register_capture_loop(name)
 
     def _register_capture_loop(self, name):
-        cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap = open_camera(640, 480)
+        if cap is None:
+            print("\n[ERROR] Could not access webcam! Please verify camera connection and Windows privacy permissions.\n")
+            return
 
         prompts = ["FRONT", "Left", "Right", "Up", "Down",
                    "Smile", "Serious", "Tilt", "Bad Light", "Neutral"]
@@ -746,10 +772,10 @@ class PowerFaceV5:
             print("=" * 50)
             time.sleep(2)
 
-        cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap = open_camera(640, 480)
+        if cap is None:
+            print("\n[ERROR] Could not open webcam! Please verify camera connection and Windows privacy permissions.\n")
+            return
         cv2.namedWindow('PowerFace V6', cv2.WINDOW_AUTOSIZE)
 
         self.running = True

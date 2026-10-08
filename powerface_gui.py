@@ -27,6 +27,7 @@ from ai_face_detection import (
     PowerFaceV5,
     ATTENDANCE_FILE,
     FACE_DB_FILE,
+    open_camera,
     draw_apple_face_box,
     face_quality_score,
     MIN_REG_QUALITY,
@@ -513,17 +514,26 @@ class PowerFaceApp:
                                        "No registered people found in database.\nAll faces will show as 'Unknown'.\nStart camera anyway?"):
                 return
 
+        # Open camera using DirectShow/MSMF multi-index opener
+        self.cap = open_camera(self.VIDEO_WIDTH, self.VIDEO_HEIGHT)
+        if self.cap is None:
+            self._stop_attendance()
+            messagebox.showerror(
+                "Camera Access Error",
+                "Could not connect to webcam!\n\n"
+                "Please verify:\n"
+                "1. No other application (Zoom, Teams, Discord, Browser) is currently using the camera.\n"
+                "2. Windows Camera Privacy is enabled:\n"
+                "   Windows Settings -> Privacy & Security -> Camera -> Allow desktop apps to access camera.\n"
+                "3. Your camera is plugged in."
+            )
+            return
+
         self.is_running = True
-        self.btn_start.configure(text="⏹ Stop Attendance", bg=self.DANGER, activebackground=self.DANGER_HOVER)
-        self.live_indicator.configure(text="● LIVE RECOGNITION", fg=self.SUCCESS)
+        self.btn_start.configure(text="⏹ Stop Attendance", bg=self.APPLE_RED, activebackground=self.APPLE_RED_HOVER)
+        self.live_indicator.configure(text="● LIVE RECOGNITION", fg=self.APPLE_GREEN)
         self.btn_register.configure(state=tk.DISABLED)
         self.subj_combo.configure(state=tk.DISABLED)
-
-        # Open camera in standard natural aspect ratio
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.VIDEO_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.VIDEO_HEIGHT)
 
         # Launch async AI worker
         self.system.running = True
@@ -532,12 +542,12 @@ class PowerFaceApp:
         self.system.detection_thread = threading.Thread(target=self.system.detection_loop, daemon=True)
         self.system.detection_thread.start()
 
-        self._set_status(f"Camera active. Subject: {self.current_subject.get()}. Matching live video...")
+        self._set_status(f"Live camera stream active. Subject: {self.current_subject.get()}. Matching live video...")
         self._video_loop()
 
     def _stop_attendance(self):
         self.is_running = False
-        self.btn_start.configure(text="▶ Start Attendance", bg=self.SUCCESS, activebackground=self.SUCCESS_HOVER)
+        self.btn_start.configure(text="▶ Start Attendance", bg=self.APPLE_GREEN, activebackground=self.APPLE_GREEN_HOVER)
         self.live_indicator.configure(text="● OFFLINE", fg=self.TEXT_MUTED)
         self.btn_register.configure(state=tk.NORMAL)
         self.subj_combo.configure(state=tk.NORMAL)
@@ -557,115 +567,118 @@ class PowerFaceApp:
 
         t0 = time.time()
         ret, frame = self.cap.read()
-        if ret:
-            # Strictly maintain natural 4:3 aspect ratio without stretching
-            if frame.shape[1] != self.VIDEO_WIDTH or frame.shape[0] != self.VIDEO_HEIGHT:
-                frame = cv2.resize(frame, (self.VIDEO_WIDTH, self.VIDEO_HEIGHT), interpolation=cv2.INTER_AREA)
+        if not ret or frame is None:
+            self.root.after(30, self._video_loop)
+            return
 
-            # Send frame to background AI detector
-            try:
-                if self.system.frame_queue.full():
-                    self.system.frame_queue.get_nowait()
-                self.system.frame_queue.put_nowait(frame)
-            except Exception:
-                pass
+        # Strictly maintain natural 4:3 aspect ratio without stretching
+        if frame.shape[1] != self.VIDEO_WIDTH or frame.shape[0] != self.VIDEO_HEIGHT:
+            frame = cv2.resize(frame, (self.VIDEO_WIDTH, self.VIDEO_HEIGHT), interpolation=cv2.INTER_AREA)
 
-            # Fetch latest detections from AI worker
-            try:
-                last_info = self.system.result_queue.get_nowait()
-                self.last_detect_ms = last_info.get('detect_ms', 0.0)
-            except Exception:
-                last_info = {'tracks': self.system.tracks, 'detect_ms': self.last_detect_ms, 'num_faces': 0}
+        # Send frame to background AI detector
+        try:
+            if self.system.frame_queue.full():
+                self.system.frame_queue.get_nowait()
+            self.system.frame_queue.put_nowait(frame)
+        except Exception:
+            pass
 
-            tracks = last_info.get('tracks', {})
-            subject = self.current_subject.get() or "General"
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            display = frame.copy()
+        # Fetch latest detections from AI worker
+        try:
+            last_info = self.system.result_queue.get_nowait()
+            self.last_detect_ms = last_info.get('detect_ms', 0.0)
+        except Exception:
+            last_info = {'tracks': self.system.tracks, 'detect_ms': self.last_detect_ms, 'num_faces': 0}
 
-            for tid, trk in tracks.items():
-                if trk.lost_frames > 0 and trk.frames_seen < 2:
-                    continue
+        tracks = last_info.get('tracks', {})
+        subject = self.current_subject.get() or "General"
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        display = frame.copy()
 
-                score = trk.score
-                stable_name = trk.stable_name
-                is_lost = trk.lost_frames > 0
-                velocity_mag = trk.velocity_mag
-                quality = trk.avg_quality
+        for tid, trk in tracks.items():
+            if trk.lost_frames > 0 and trk.frames_seen < 2:
+                continue
 
-                # Adaptive motion thresholds (detecting walking / moving subjects)
-                if velocity_mag > WALKING_VELOCITY_THRESHOLD:
-                    threshold = THRESH_LOW_CONF
-                elif velocity_mag > MOVING_VELOCITY_THRESHOLD:
-                    threshold = THRESH_MEDIUM_CONF
-                else:
-                    threshold = THRESH_HIGH_CONF
+            score = trk.score
+            stable_name = trk.stable_name
+            is_lost = trk.lost_frames > 0
+            velocity_mag = trk.velocity_mag
+            quality = trk.avg_quality
 
-                quality_ok = quality >= MIN_QUALITY_FOR_RELAXED_ATTENDANCE
-                if velocity_mag > WALKING_VELOCITY_THRESHOLD and quality_ok:
-                    current_attendance_thresh = ATTENDANCE_THRESH_WALKING
-                elif velocity_mag > MOVING_VELOCITY_THRESHOLD and quality_ok:
-                    current_attendance_thresh = ATTENDANCE_THRESH_MOVING
-                else:
-                    current_attendance_thresh = ATTENDANCE_THRESH_STILL
+            # Adaptive motion thresholds (detecting walking / moving subjects)
+            if velocity_mag > WALKING_VELOCITY_THRESHOLD:
+                threshold = THRESH_LOW_CONF
+            elif velocity_mag > MOVING_VELOCITY_THRESHOLD:
+                threshold = THRESH_MEDIUM_CONF
+            else:
+                threshold = THRESH_HIGH_CONF
 
-                recognized = stable_name != "Unknown" and score > threshold
-                is_marked = trk.attendance_marked
+            quality_ok = quality >= MIN_QUALITY_FOR_RELAXED_ATTENDANCE
+            if velocity_mag > WALKING_VELOCITY_THRESHOLD and quality_ok:
+                current_attendance_thresh = ATTENDANCE_THRESH_WALKING
+            elif velocity_mag > MOVING_VELOCITY_THRESHOLD and quality_ok:
+                current_attendance_thresh = ATTENDANCE_THRESH_MOVING
+            else:
+                current_attendance_thresh = ATTENDANCE_THRESH_STILL
 
-                if recognized and score >= current_attendance_thresh:
-                    now = time.time()
-                    if trk.confirmed and not trk.attendance_marked and not is_lost:
-                        if stable_name not in self.marked_today or (now - self.marked_today[stable_name]) > ATTENDANCE_COOLDOWN:
-                            self.marked_today[stable_name] = now
-                            trk.attendance_marked = True
-                            is_marked = True
-                            self.system.flash_effects[tid] = FLASH_DURATION
-                            ts = datetime.now().strftime("%H:%M:%S")
+            recognized = stable_name != "Unknown" and score > threshold
+            is_marked = trk.attendance_marked
 
-                            # Save to CSV
-                            rec = {
-                                'date': today_str, 'time': ts, 'name': stable_name,
-                                'subject': subject, 'confidence': round(score, 4),
-                                'quality': round(quality, 3)
-                            }
-                            self.system.save_attendance([rec])
+            if recognized and score >= current_attendance_thresh:
+                now = time.time()
+                if trk.confirmed and not trk.attendance_marked and not is_lost:
+                    if stable_name not in self.marked_today or (now - self.marked_today[stable_name]) > ATTENDANCE_COOLDOWN:
+                        self.marked_today[stable_name] = now
+                        trk.attendance_marked = True
+                        is_marked = True
+                        self.system.flash_effects[tid] = FLASH_DURATION
+                        ts = datetime.now().strftime("%H:%M:%S")
 
-                            # Update Live Roster Treeview
-                            self.live_tree.insert("", 0, values=(
-                                ts, stable_name, subject, f"{score:.1%}", f"{quality:.2f}"
-                            ))
-                            self.stat_present._val.configure(text=str(len(self.marked_today)))
-                            self._set_status(f"✓ ATTENDANCE RECORDED: {stable_name} ({score:.0%})")
+                        # Save to CSV
+                        rec = {
+                            'date': today_str, 'time': ts, 'name': stable_name,
+                            'subject': subject, 'confidence': round(score, 4),
+                            'quality': round(quality, 3)
+                        }
+                        self.system.save_attendance([rec])
 
-                flash_rem = self.system.flash_effects.get(tid, 0)
-                # Render Apple-style FaceID reticle with pulsating green flash
-                draw_apple_face_box(
-                    display=display,
-                    bbox=trk.bbox,
-                    name=stable_name,
-                    score=score,
-                    quality=quality,
-                    velocity_mag=velocity_mag,
-                    is_marked=is_marked,
-                    is_lost=is_lost,
-                    flash_remaining=flash_rem,
-                    needed_thresh=current_attendance_thresh
-                )
+                        # Update Live Roster Treeview
+                        self.live_tree.insert("", 0, values=(
+                            ts, stable_name, subject, f"{score:.1%}", f"{quality:.2f}"
+                        ))
+                        self.stat_present._val.configure(text=str(len(self.marked_today)))
+                        self._set_status(f"✓ ATTENDANCE RECORDED: {stable_name} ({score:.0%})")
 
-                if flash_rem > 0:
-                    self.system.flash_effects[tid] -= 1
+            flash_rem = self.system.flash_effects.get(tid, 0)
+            # Render Apple-style FaceID reticle with pulsating green flash
+            draw_apple_face_box(
+                display=display,
+                bbox=trk.bbox,
+                name=stable_name,
+                score=score,
+                quality=quality,
+                velocity_mag=velocity_mag,
+                is_marked=is_marked,
+                is_lost=is_lost,
+                flash_remaining=flash_rem,
+                needed_thresh=current_attendance_thresh
+            )
 
-            self.system.flash_effects = {k: v for k, v in self.system.flash_effects.items() if v > 0}
+            if flash_rem > 0:
+                self.system.flash_effects[tid] -= 1
 
-            # Render frame on embedded GUI label
-            self._render_numpy_to_label(display, self.video_label)
+        self.system.flash_effects = {k: v for k, v in self.system.flash_effects.items() if v > 0}
 
-            # Measure live FPS
-            elapsed = time.time() - t0
-            self.fps_tracker.append(elapsed)
-            if len(self.fps_tracker) > 20:
-                self.fps_tracker.pop(0)
-            avg_fps = len(self.fps_tracker) / max(sum(self.fps_tracker), 0.001)
-            self.stat_latency._val.configure(text=f"{self.last_detect_ms:.0f} ms  ({avg_fps:.0f} FPS)")
+        # Render frame on embedded GUI label
+        self._render_numpy_to_label(display, self.video_label)
+
+        # Measure live FPS
+        elapsed = time.time() - t0
+        self.fps_tracker.append(elapsed)
+        if len(self.fps_tracker) > 20:
+            self.fps_tracker.pop(0)
+        avg_fps = len(self.fps_tracker) / max(sum(self.fps_tracker), 0.001)
+        self.stat_latency._val.configure(text=f"{self.last_detect_ms:.0f} ms  ({avg_fps:.0f} FPS)")
 
         self.root.after(10, self._video_loop)
 
@@ -678,6 +691,16 @@ class PowerFaceApp:
         if not name or not name.strip():
             return
         name = name.strip()
+
+        # Open webcam for enrollment
+        cap = open_camera(640, 480)
+        if cap is None:
+            messagebox.showerror(
+                "Camera Access Error",
+                "Could not access webcam for enrollment!\nPlease ensure no other application is using the camera.",
+                parent=self.root
+            )
+            return
 
         # Build Apple-styled Modal
         reg_win = tk.Toplevel(self.root)
@@ -721,7 +744,7 @@ class PowerFaceApp:
         cap_state = {
             'running': True,
             'candidates': [],
-            'cap': cv2.VideoCapture(0),
+            'cap': cap,
             'flash_frames': 0
         }
         cap_state['cap'].set(cv2.CAP_PROP_FRAME_WIDTH, 640)
