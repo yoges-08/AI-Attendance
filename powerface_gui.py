@@ -260,7 +260,8 @@ class PowerFaceApp:
         self._update_clock()
 
     def _update_clock(self):
-        now_str = time.strftime("📅 %A, %b %d, %Y  •  %H:%M:%S")
+        now = datetime.now()
+        now_str = f"📅 {now.strftime('%A, %b %d, %Y')}  •  {now.strftime('%H:%M:%S')}"
         self.clock_label.configure(text=now_str)
         self.root.after(1000, self._update_clock)
 
