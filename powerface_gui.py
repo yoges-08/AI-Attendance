@@ -92,8 +92,11 @@ class PowerFaceApp:
         # State management
         self.cap = None
         self.is_running = False
-        self.current_subject = tk.StringVar(value="General")
-        self.marked_today = {}
+        self.current_mode = tk.StringVar(value="Staff Check-In")
+        self.current_subject = self.current_mode  # Backward compatibility alias
+        self.checked_in_today = set()
+        self.checked_out_today = set()
+        self.marked_cooldown = {}
         self.session_records = []
         self.fps_tracker = []
         self.last_detect_ms = 0.0
@@ -173,7 +176,7 @@ class PowerFaceApp:
             ("dashboard", "🏠", "Dashboard"),
             ("live", "📹", "Live Feed"),
             ("attendance", "📋", "Attendance"),
-            ("students", "👥", "Students"),
+            ("students", "👥", "Staff"),
             ("reports", "📑", "Reports"),
             ("settings", "⚙️", "Settings"),
         ]
@@ -241,7 +244,7 @@ class PowerFaceApp:
         title_lbl = tk.Label(left_box, text="PowerFace V6", font=("Segoe UI", 15, "bold"), fg=self.TEXT_MAIN, bg=self.CARD_BG)
         title_lbl.pack(side=tk.LEFT)
 
-        sub_lbl = tk.Label(left_box, text="Apple Intelligence Attendance Engine", font=("Segoe UI", 10), fg=self.TEXT_MUTED, bg=self.CARD_BG, padx=12)
+        sub_lbl = tk.Label(left_box, text="Staff Attendance & Access Management Engine", font=("Segoe UI", 10), fg=self.TEXT_MUTED, bg=self.CARD_BG, padx=12)
         sub_lbl.pack(side=tk.LEFT, pady=(2, 0))
 
         # Right Hardware & Clock
@@ -272,9 +275,9 @@ class PowerFaceApp:
 
         self.stat_registered = self._create_stat_card(
             stats_frame,
-            title="Enrolled Profiles",
+            title="Enrolled Staff",
             value="8",
-            subtitle="Total students registered",
+            subtitle="Total registered staff",
             icon="👥",
             icon_bg="#1E3A8A",
             icon_fg="#38BDF8",
@@ -285,9 +288,9 @@ class PowerFaceApp:
 
         self.stat_present = self._create_stat_card(
             stats_frame,
-            title="Verified Present",
+            title="Staff Check-In",
             value="0",
-            subtitle="Currently present",
+            subtitle="Checked in today",
             icon="✓",
             icon_bg="#064E3B",
             icon_fg="#10B981",
@@ -296,18 +299,19 @@ class PowerFaceApp:
         )
         self.stat_present.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
 
-        self.stat_subject = self._create_stat_card(
+        self.stat_checkout = self._create_stat_card(
             stats_frame,
-            title="Active Subject",
-            value="General",
-            subtitle="Selected subject",
-            icon="👤",
+            title="Staff Check-Out",
+            value="0",
+            subtitle="Checked out today",
+            icon="🚪",
             icon_bg="#581C87",
             icon_fg="#C084FC",
             val_color="#C084FC",
             sparkline_color="#A855F7"
         )
-        self.stat_subject.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.stat_checkout.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.stat_subject = self.stat_checkout  # Backward compatibility alias
 
         self.stat_latency = self._create_stat_card(
             stats_frame,
@@ -388,13 +392,13 @@ class PowerFaceApp:
         control_bar = tk.Frame(left_col, bg=self.CARD_BG)
         control_bar.pack(fill=tk.X, pady=(4, 0))
 
-        tk.Label(control_bar, text="Subject:", font=("Segoe UI", 10, "bold"), fg=self.TEXT_MUTED, bg=self.CARD_BG).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(control_bar, text="Mode:", font=("Segoe UI", 10, "bold"), fg=self.TEXT_MUTED, bg=self.CARD_BG).pack(side=tk.LEFT, padx=(0, 6))
 
-        subjects = ["General", "Mathematics", "Physics", "Computer Science", "Chemistry", "English", "Biology"]
-        self.subj_combo = ttk.Combobox(control_bar, textvariable=self.current_subject, values=subjects, width=13)
-        self.subj_combo.pack(side=tk.LEFT, padx=(0, 12))
-        self.subj_combo.bind("<<ComboboxSelected>>", lambda e: self.stat_subject._val.configure(text=self.current_subject.get()))
-        self.subj_combo.bind("<KeyRelease>", lambda e: self.stat_subject._val.configure(text=self.current_subject.get()))
+        modes = ["Staff Check-In", "Staff Check-Out"]
+        self.mode_combo = ttk.Combobox(control_bar, textvariable=self.current_mode, values=modes, width=15, state="readonly")
+        self.mode_combo.pack(side=tk.LEFT, padx=(0, 12))
+        self.subj_combo = self.mode_combo
+        self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_selected)
 
         self.btn_start = self._make_pill_button(
             control_bar,
@@ -408,7 +412,7 @@ class PowerFaceApp:
 
         self.btn_register = self._make_pill_button(
             control_bar,
-            text="Enroll Person",
+            text="Enroll Staff",
             icon="➕",
             command=self._open_register_dialog,
             bg_color=self.ACCENT_BLUE,
@@ -461,6 +465,10 @@ class PowerFaceApp:
         # Show initial tab
         self._switch_tab("roster")
 
+    def _on_mode_selected(self, event=None):
+        m = self.current_mode.get()
+        self._set_status(f"Attendance mode set to: {m}")
+
     def _make_pill_button(self, parent, text, command, bg_color, hover_color, fg="#FFFFFF", icon=None):
         label_text = f"{icon}  {text}" if icon else text
         btn = tk.Button(
@@ -512,20 +520,23 @@ class PowerFaceApp:
         tree_frame = tk.Frame(self.frame_roster, bg=self.CARD_BG)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        cols = ("time", "name", "subject", "confidence", "quality")
+        cols = ("time", "name", "mode", "confidence", "quality")
         self.live_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
 
         self.live_tree.heading("time", text="Time")
-        self.live_tree.heading("name", text="Student Name")
-        self.live_tree.heading("subject", text="Subject")
+        self.live_tree.heading("name", text="Staff Name")
+        self.live_tree.heading("mode", text="Status / Mode")
         self.live_tree.heading("confidence", text="Match Conf")
         self.live_tree.heading("quality", text="Face")
 
         self.live_tree.column("time", width=70, anchor=tk.CENTER)
-        self.live_tree.column("name", width=130, anchor=tk.W)
-        self.live_tree.column("subject", width=85, anchor=tk.W)
-        self.live_tree.column("confidence", width=80, anchor=tk.CENTER)
-        self.live_tree.column("quality", width=65, anchor=tk.CENTER)
+        self.live_tree.column("name", width=125, anchor=tk.W)
+        self.live_tree.column("mode", width=110, anchor=tk.CENTER)
+        self.live_tree.column("confidence", width=75, anchor=tk.CENTER)
+        self.live_tree.column("quality", width=60, anchor=tk.CENTER)
+
+        self.live_tree.tag_configure("checkin", foreground="#34D399")
+        self.live_tree.tag_configure("checkout", foreground="#FBBF24")
 
         scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.live_tree.yview)
         self.live_tree.configure(yscrollcommand=scroll.set)
@@ -601,12 +612,24 @@ class PowerFaceApp:
         tree_frame = tk.Frame(self.frame_audit, bg=self.CARD_BG)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        cols = ("date", "time", "name", "subject", "confidence", "quality")
+        cols = ("date", "time", "name", "mode", "confidence", "quality")
         self.hist_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
-        for c in cols:
-            self.hist_tree.heading(c, text=c.title())
-            w = 75 if c in ("date", "time", "confidence", "quality") else 115
-            self.hist_tree.column(c, width=w, anchor=tk.CENTER if c in ("date", "time", "confidence", "quality") else tk.W)
+        self.hist_tree.heading("date", text="Date")
+        self.hist_tree.heading("time", text="Time")
+        self.hist_tree.heading("name", text="Staff Name")
+        self.hist_tree.heading("mode", text="Status / Mode")
+        self.hist_tree.heading("confidence", text="Match Conf")
+        self.hist_tree.heading("quality", text="Face")
+
+        self.hist_tree.column("date", width=80, anchor=tk.CENTER)
+        self.hist_tree.column("time", width=70, anchor=tk.CENTER)
+        self.hist_tree.column("name", width=120, anchor=tk.W)
+        self.hist_tree.column("mode", width=110, anchor=tk.CENTER)
+        self.hist_tree.column("confidence", width=75, anchor=tk.CENTER)
+        self.hist_tree.column("quality", width=60, anchor=tk.CENTER)
+
+        self.hist_tree.tag_configure("checkin", foreground="#34D399")
+        self.hist_tree.tag_configure("checkout", foreground="#FBBF24")
 
         scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.hist_tree.yview)
         self.hist_tree.configure(yscrollcommand=scroll.set)
@@ -680,24 +703,35 @@ class PowerFaceApp:
             return
 
         today_str = datetime.now().strftime("%Y-%m-%d")
-        today_marked_set = set()
+        today_checkin_set = set()
+        today_checkout_set = set()
 
         try:
             with open(ATTENDANCE_FILE, 'r') as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
                 for row in reversed(rows):
+                    mode_val = row.get('mode') or row.get('subject') or "Staff Check-In"
+                    tag = "checkout" if ("out" in mode_val.lower()) else "checkin"
                     self.hist_tree.insert("", tk.END, values=(
                         row.get('date', ''),
                         row.get('time', ''),
                         row.get('name', ''),
-                        row.get('subject', ''),
+                        mode_val,
                         row.get('confidence', ''),
                         row.get('quality', '')
-                    ))
+                    ), tags=(tag,))
                     if row.get('date') == today_str:
-                        today_marked_set.add(row.get('name'))
-            self.stat_present._val.configure(text=str(len(today_marked_set)))
+                        name = row.get('name')
+                        if name:
+                            if "out" in mode_val.lower():
+                                today_checkout_set.add(name)
+                            else:
+                                today_checkin_set.add(name)
+            self.checked_in_today = today_checkin_set
+            self.checked_out_today = today_checkout_set
+            self.stat_present._val.configure(text=str(len(today_checkin_set)))
+            self.stat_checkout._val.configure(text=str(len(today_checkout_set)))
         except Exception as e:
             self._set_status(f"Error loading records: {e}")
 
@@ -707,12 +741,12 @@ class PowerFaceApp:
             return
         dest = filedialog.asksaveasfilename(defaultextension=".csv",
                                             filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
-                                            initialfile=f"Attendance_Report_{datetime.now().strftime('%Y%m%d')}.csv")
+                                            initialfile=f"Staff_Attendance_Report_{datetime.now().strftime('%Y%m%d')}.csv")
         if dest:
             try:
                 import shutil
                 shutil.copyfile(ATTENDANCE_FILE, dest)
-                messagebox.showinfo("Export Success", f"Attendance records successfully saved to:\n{dest}")
+                messagebox.showinfo("Export Success", f"Staff attendance records successfully saved to:\n{dest}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to export CSV: {e}")
 
@@ -726,7 +760,7 @@ class PowerFaceApp:
     def _start_attendance(self):
         if not self.system.known_faces:
             if not messagebox.askyesno("No Registered Faces",
-                                       "No registered people found in database.\nAll faces will show as 'Unknown'.\nStart camera anyway?"):
+                                       "No registered staff profiles found in database.\nAll faces will show as 'Unknown'.\nStart camera anyway?"):
                 return
 
         # Open camera using DirectShow/MSMF multi-index opener
@@ -748,7 +782,7 @@ class PowerFaceApp:
         self.btn_start.configure(text="⏹ Stop Attendance", bg=self.ACCENT_RED, activebackground=self.ACCENT_RED_HOVER)
         self.live_indicator.configure(text="● LIVE RECOGNITION", fg=self.ACCENT_GREEN)
         self.btn_register.configure(state=tk.DISABLED)
-        self.subj_combo.configure(state=tk.DISABLED)
+        self.mode_combo.configure(state=tk.DISABLED)
 
         # Launch async AI worker
         self.system.running = True
@@ -757,7 +791,7 @@ class PowerFaceApp:
         self.system.detection_thread = threading.Thread(target=self.system.detection_loop, daemon=True)
         self.system.detection_thread.start()
 
-        self._set_status(f"Live camera stream active. Subject: {self.current_subject.get()}. Matching live video...")
+        self._set_status(f"Live camera stream active. Mode: {self.current_mode.get()}. Matching live video...")
         self._video_loop()
 
     def _stop_attendance(self):
@@ -765,7 +799,7 @@ class PowerFaceApp:
         self.btn_start.configure(text="▶ Start Attendance", bg=self.ACCENT_GREEN, activebackground=self.ACCENT_GREEN_HOVER)
         self.live_indicator.configure(text="● OFFLINE", fg=self.TEXT_SUB)
         self.btn_register.configure(state=tk.NORMAL)
-        self.subj_combo.configure(state=tk.NORMAL)
+        self.mode_combo.configure(state="readonly")
 
         if self.cap:
             self.cap.release()
@@ -806,7 +840,7 @@ class PowerFaceApp:
             last_info = {'tracks': self.system.tracks, 'detect_ms': self.last_detect_ms, 'num_faces': 0}
 
         tracks = last_info.get('tracks', {})
-        subject = self.current_subject.get() or "General"
+        mode = self.current_mode.get() or "Staff Check-In"
         today_str = datetime.now().strftime("%Y-%m-%d")
         display = frame.copy()
 
@@ -842,8 +876,9 @@ class PowerFaceApp:
             if recognized and score >= current_attendance_thresh:
                 now = time.time()
                 if trk.confirmed and not trk.attendance_marked and not is_lost:
-                    if stable_name not in self.marked_today or (now - self.marked_today[stable_name]) > ATTENDANCE_COOLDOWN:
-                        self.marked_today[stable_name] = now
+                    last_marked = self.marked_cooldown.get((stable_name, mode), 0)
+                    if (now - last_marked) > ATTENDANCE_COOLDOWN:
+                        self.marked_cooldown[(stable_name, mode)] = now
                         trk.attendance_marked = True
                         is_marked = True
                         self.system.flash_effects[tid] = FLASH_DURATION
@@ -852,17 +887,25 @@ class PowerFaceApp:
                         # Save to CSV
                         rec = {
                             'date': today_str, 'time': ts, 'name': stable_name,
-                            'subject': subject, 'confidence': round(score, 4),
+                            'mode': mode, 'subject': mode, 'confidence': round(score, 4),
                             'quality': round(quality, 3)
                         }
                         self.system.save_attendance([rec])
 
                         # Update Live Roster Treeview
+                        tag = "checkout" if "out" in mode.lower() else "checkin"
                         self.live_tree.insert("", 0, values=(
-                            ts, stable_name, subject, f"{score:.1%}", f"{quality:.2f}"
-                        ))
-                        self.stat_present._val.configure(text=str(len(self.marked_today)))
-                        self._set_status(f"✓ ATTENDANCE RECORDED: {stable_name} ({score:.0%})")
+                            ts, stable_name, mode, f"{score:.1%}", f"{quality:.2f}"
+                        ), tags=(tag,))
+
+                        if "out" in mode.lower():
+                            self.checked_out_today.add(stable_name)
+                            self.stat_checkout._val.configure(text=str(len(self.checked_out_today)))
+                            self._set_status(f"🚪 STAFF CHECK-OUT: {stable_name} ({score:.0%})")
+                        else:
+                            self.checked_in_today.add(stable_name)
+                            self.stat_present._val.configure(text=str(len(self.checked_in_today)))
+                            self._set_status(f"✓ STAFF CHECK-IN: {stable_name} ({score:.0%})")
 
             flash_rem = self.system.flash_effects.get(tid, 0)
             # Render Apple-style FaceID reticle with pulsating green flash
@@ -902,7 +945,7 @@ class PowerFaceApp:
         if self.is_running:
             self._stop_attendance()
 
-        name = simpledialog.askstring("Enroll Person", "Enter the full name of the student/person:", parent=self.root)
+        name = simpledialog.askstring("Enroll Staff", "Enter the full name of the staff member:", parent=self.root)
         if not name or not name.strip():
             return
         name = name.strip()

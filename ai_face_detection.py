@@ -763,10 +763,13 @@ class PowerFaceV5:
                 logging.error(traceback.format_exc())
 
     # ==================== TAKE ATTENDANCE ====================
-    def take_attendance(self, subject="General"):
+    # ==================== TAKE ATTENDANCE ====================
+    def take_attendance(self, mode="Staff Check-In", subject=None):
+        if subject is not None:
+            mode = subject
         if not self.known_faces:
             print("=" * 50)
-            print("WARNING: No registered people found!")
+            print("WARNING: No registered staff profiles found!")
             print("The camera will open, but all faces will show as 'Unknown'.")
             print("Please close the camera and select Option 1 to register.")
             print("=" * 50)
@@ -793,7 +796,7 @@ class PowerFaceV5:
         last_info = {'num_faces': 0, 'night_mode': False, 'detect_ms': 0, 'tracks': {}}
         frame_counter = 0
 
-        print(f"\n=== Attendance: {subject} ===\nQ=Quit\n")
+        print(f"\n=== Attendance Mode: {mode} ===\nQ=Quit\n")
 
         while True:
             t_start = time.time()
@@ -863,10 +866,10 @@ class PowerFaceV5:
                             ts = datetime.now().strftime("%H:%M:%S")
                             attendance_log.append({
                                 'date': today, 'time': ts, 'name': stable_name,
-                                'subject': subject, 'confidence': round(score, 4),
+                                'mode': mode, 'subject': mode, 'confidence': round(score, 4),
                                 'quality': round(quality, 3)
                             })
-                            logging.info(f"MARKED: {stable_name} at {score:.0%} "
+                            logging.info(f"MARKED [{mode}]: {stable_name} at {score:.0%} "
                                          f"(Vel: {velocity_mag:.0f}, Qual: {quality:.2f})")
 
                 flash_rem = self.flash_effects.get(tid, 0)
@@ -892,9 +895,9 @@ class PowerFaceV5:
                 display_fps = len(frame_times) / sum(frame_times)
 
             # Minimal HUD
-            draw_translucent_rect(display, (0, 0), (430, 80), (30, 30, 30), 0.8)
+            draw_translucent_rect(display, (0, 0), (450, 80), (30, 30, 30), 0.8)
             hw_str = "GPU (DirectML)" if self.use_gpu else "CPU Mode"
-            put_text_shadow(display, f"FPS:{display_fps:.0f} Det:{detect_fps:.0f} | {hw_str}",
+            put_text_shadow(display, f"FPS:{display_fps:.0f} Det:{detect_fps:.0f} | {hw_str} | {mode}",
                             (10, 25), 0.5, (0, 255, 200) if self.use_gpu else (200, 200, 200))
             put_text_shadow(display, f"Thresh: {current_attendance_thresh:.0%} | {'NIGHT' if is_night else 'DAY'} | Crowd:{last_info['num_faces']}",
                             (10, 50), 0.45, (0, 150, 255) if is_night else (50, 205, 50))
@@ -903,7 +906,7 @@ class PowerFaceV5:
                 rx = display.shape[1] - 220
                 draw_translucent_rect(display, (rx, 0), (display.shape[1], len(marked) * 24 + 35),
                                       (30, 30, 30), 0.85)
-                put_text_shadow(display, f"PRESENT:{len(marked)}", (rx + 10, 22), 0.55, (50, 205, 50))
+                put_text_shadow(display, f"MARKED TODAY:{len(marked)}", (rx + 10, 22), 0.55, (50, 205, 50))
                 for i, mname in enumerate(sorted(marked.keys())):
                     put_text_shadow(display, f"  {mname}", (rx + 15, 50 + i * 24), 0.45, (255, 255, 255))
 
@@ -923,22 +926,37 @@ class PowerFaceV5:
         if not records:
             return
         exists = os.path.exists(ATTENDANCE_FILE)
+        fieldnames = ['date', 'time', 'name', 'mode', 'confidence', 'quality']
+        if exists:
+            try:
+                with open(ATTENDANCE_FILE, 'r', newline='') as rf:
+                    first_line = rf.readline()
+                    if 'subject' in first_line and 'mode' not in first_line:
+                        fieldnames = ['date', 'time', 'name', 'subject', 'confidence', 'quality']
+            except Exception:
+                pass
+
         with open(ATTENDANCE_FILE, 'a', newline='') as f:
-            w = csv.DictWriter(f, fieldnames=['date', 'time', 'name', 'subject', 'confidence', 'quality'])
+            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
             if not exists:
                 w.writeheader()
             for r in records:
+                if 'mode' in fieldnames and 'mode' not in r and 'subject' in r:
+                    r['mode'] = r['subject']
+                elif 'subject' in fieldnames and 'subject' not in r and 'mode' in r:
+                    r['subject'] = r['mode']
                 w.writerow(r)
 
     def view_attendance(self):
         if not os.path.exists(ATTENDANCE_FILE):
             print("No attendance records yet!")
             return
-        print(f"\n{'DATE':<12}{'TIME':<10}{'NAME':<20}{'CONF':<8}{'QUAL':<6}")
-        print("-" * 56)
+        print(f"\n{'DATE':<12}{'TIME':<10}{'NAME':<18}{'MODE':<18}{'CONF':<8}{'QUAL':<6}")
+        print("-" * 72)
         with open(ATTENDANCE_FILE, 'r') as f:
             for row in csv.DictReader(f):
-                print(f"{row['date']:<12}{row['time']:<10}{row['name']:<20}"
+                mode_str = row.get('mode') or row.get('subject', 'Staff Check-In')
+                print(f"{row['date']:<12}{row['time']:<10}{row['name']:<18}{mode_str:<18}"
                       f"{row['confidence']:<8}{row.get('quality', ''):<6}")
 
 
@@ -947,12 +965,12 @@ def main():
     system = PowerFaceV5()
     while True:
         print("\n" + "=" * 50)
-        print("  POWER FACE V6 - LOW-END OPTIMIZED")
+        print("  POWER FACE V6 - STAFF ATTENDANCE SYSTEM")
         print("=" * 50)
-        print("1. Register Person")
-        print("2. Take Attendance")
-        print("3. View Registered People")
-        print("4. Delete Person")
+        print("1. Register Staff Profile")
+        print("2. Staff Check-In / Check-Out")
+        print("3. View Registered Staff Profiles")
+        print("4. Delete Staff Profile")
         print("5. View Attendance Records")
         print("6. Exit")
         print("-" * 50)
@@ -962,8 +980,12 @@ def main():
         if c == '1':
             system.register_person()
         elif c == '2':
-            sub = input("Subject Name (Enter=General): ").strip() or "General"
-            system.take_attendance(sub)
+            print("\nSelect Attendance Mode:")
+            print("1. Staff Check-In")
+            print("2. Staff Check-Out")
+            m_choice = input("Select (1-2, Enter=Check-In): ").strip()
+            mode = "Staff Check-Out" if m_choice == '2' else "Staff Check-In"
+            system.take_attendance(mode)
         elif c == '3':
             system.list_registered()
         elif c == '4':
